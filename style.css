@@ -1,0 +1,31 @@
+/* MUSORICHO WINES & SPIRITS POS — base styles
+   Layout, theme-aware, and component styles are generated at runtime
+   by app.jsx (they change with dark/light mode), this file only holds
+   the static page reset. */
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, "Inter", "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#babel-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  font-family: Georgia, "Times New Roman", serif;
+  color: #5C1A33;
+  font-size: 15px;
+  letter-spacing: 0.5px;
+}

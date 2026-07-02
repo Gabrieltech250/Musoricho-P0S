@@ -2,11 +2,28 @@
    Runs entirely in the browser via in-browser Babel (no build step needed).
    Loaded as a classic <script type="text/babel"> from index.html. */
 
-const { useState, useMemo } = React;
+const { useState, useMemo, useEffect } = React;
 const {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } = Recharts;
+
+/* ---------------------------------- local persistence (standalone build only) ---------------------------------- */
+function loadState(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+function saveState(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    /* storage unavailable (private browsing, quota, etc.) — fail silently */
+  }
+}
 
 /* ---------------------------------- lightweight icon set (no external icon library needed) ---------------------------------- */
 function Icon({ size = 16, color = "currentColor", style, strokeWidth = 2, children, viewBox = "0 0 24 24" }) {
@@ -102,18 +119,24 @@ function App() {
   const [view, setView] = useState("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  const [products, setProducts] = useState(initialProducts);
-  const [customers, setCustomers] = useState(initialCustomers);
-  const [transactions, setTransactions] = useState(initialTransactions);
-  const [sales, setSales] = useState([]);
-  const [businessInfo, setBusinessInfo] = useState({
+  const [products, setProducts] = useState(() => loadState("musoricho_products", initialProducts));
+  const [customers, setCustomers] = useState(() => loadState("musoricho_customers", initialCustomers));
+  const [transactions, setTransactions] = useState(() => loadState("musoricho_transactions", initialTransactions));
+  const [sales, setSales] = useState(() => loadState("musoricho_sales", []));
+  const [businessInfo, setBusinessInfo] = useState(() => loadState("musoricho_business_info", {
     name: "MUSORICHO WINES & SPIRITS",
     currency: "KES",
     vatRate: 16,
     pin: "P0512345678X",
     phone: "0722 000 000",
     address: "Moi Avenue, Nairobi",
-  });
+  }));
+
+  useEffect(() => { saveState("musoricho_products", products); }, [products]);
+  useEffect(() => { saveState("musoricho_customers", customers); }, [customers]);
+  useEffect(() => { saveState("musoricho_transactions", transactions); }, [transactions]);
+  useEffect(() => { saveState("musoricho_sales", sales); }, [sales]);
+  useEffect(() => { saveState("musoricho_business_info", businessInfo); }, [businessInfo]);
   const [cart, setCart] = useState([]);
   const [discountPct, setDiscountPct] = useState(0);
   const [payMethod, setPayMethod] = useState("Cash");

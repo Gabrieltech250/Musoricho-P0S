@@ -58,6 +58,7 @@ const UserCircle2 = (p) => <Icon {...p}><circle cx="12" cy="12" r="9.5" /><circl
 const Lock = (p) => <Icon {...p}><rect x="5" y="11" width="14" height="9" rx="1.5" /><path d="M8 11V7.5a4 4 0 0 1 8 0V11" /></Icon>;
 const Menu = (p) => <Icon {...p}><line x1="4" y1="6" x2="20" y2="6" /><line x1="4" y1="12" x2="20" y2="12" /><line x1="4" y1="18" x2="20" y2="18" /></Icon>;
 const PanelLeftClose = (p) => <Icon {...p}><rect x="3" y="4" width="18" height="16" rx="2" /><line x1="10" y1="4" x2="10" y2="20" /><path d="M7 10l2 2-2 2" /></Icon>;
+const Bluetooth = (p) => <Icon {...p}><path d="M7 7l10 10-5 5V2l5 5L7 17" /></Icon>;
 
 
 
@@ -80,6 +81,104 @@ const palette = {
 
 const fmtKES = (n) =>
   "KES " + Number(n || 0).toLocaleString("en-KE", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+
+/* ---------------------------------- Bluetooth thermal printing (ESC/POS) ---------------------------------- */
+// Common service/characteristic UUIDs used by generic BLE thermal printers (P58E and similar clones).
+const BT_PRINTER_SERVICES = [
+  "000018f0-0000-1000-8000-00805f9b34fb",
+  "0000ff00-0000-1000-8000-00805f9b34fb",
+  "0000ffe0-0000-1000-8000-00805f9b34fb",
+  "49535343-fe7d-4ae5-8fa9-9fafd205e455",
+  "e7810a71-73ae-499d-8c15-faa9aef0c3f2",
+];
+
+async function connectBluetoothPrinter() {
+  if (!navigator.bluetooth) {
+    throw new Error("Bluetooth printing needs Chrome on Android (or desktop Chrome). This browser doesn't support it.");
+  }
+  const device = await navigator.bluetooth.requestDevice({
+    acceptAllDevices: true,
+    optionalServices: BT_PRINTER_SERVICES,
+  });
+  const server = await device.gatt.connect();
+  const services = await server.getPrimaryServices();
+  let writable = null;
+  for (const service of services) {
+    const chars = await service.getCharacteristics();
+    for (const c of chars) {
+      if (c.properties.write || c.properties.writeWithoutResponse) { writable = c; break; }
+    }
+    if (writable) break;
+  }
+  if (!writable) throw new Error("Connected, but couldn't find a printable channel on this device.");
+  return { device, characteristic: writable, name: device.name || "Bluetooth Printer" };
+}
+
+async function writeBytesToPrinter(characteristic, bytes) {
+  const chunkSize = 20; // conservative BLE MTU for older printer chipsets
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.slice(i, i + chunkSize);
+    if (characteristic.properties.writeWithoutResponse) {
+      await characteristic.writeValueWithoutResponse(chunk);
+    } else {
+      await characteristic.writeValue(chunk);
+    }
+    await new Promise(r => setTimeout(r, 20));
+  }
+}
+
+// Build raw ESC/POS bytes for a 58mm printer (32-character line width).
+function buildEscPosReceipt(sale, businessInfo) {
+  const WIDTH = 32;
+  const enc = new TextEncoder();
+  const bytes = [];
+  const push = (arr) => bytes.push(...arr);
+  const text = (s) => push(Array.from(enc.encode(s)));
+  const center = (on) => push([0x1B, 0x61, on ? 1 : 0]);
+  const bold = (on) => push([0x1B, 0x45, on ? 1 : 0]);
+  const line = (s = "") => { text(s); push([0x0A]); };
+  const rule = () => line("-".repeat(WIDTH));
+  const twoCol = (l, r) => {
+    l = String(l); r = String(r);
+    const gap = Math.max(1, WIDTH - l.length - r.length);
+    line(l + " ".repeat(gap) + r);
+  };
+
+  push([0x1B, 0x40]); // init
+  center(true); bold(true);
+  line(businessInfo.name);
+  bold(false);
+  line(businessInfo.address);
+  line(businessInfo.phone);
+  line("PIN: " + businessInfo.pin);
+  center(false);
+  rule();
+  twoCol("Receipt#", sale.id);
+  twoCol("Date", `${sale.date} ${sale.time}`);
+  twoCol("Cashier", sale.cashier);
+  twoCol("Customer", sale.customer);
+  rule();
+  sale.items.forEach(it => {
+    line(it.name.slice(0, WIDTH));
+    twoCol(`${it.qty} x ${fmtKES(it.price)}`, fmtKES(it.qty * it.price));
+  });
+  rule();
+  twoCol("Subtotal", fmtKES(sale.subtotal));
+  twoCol("Discount", "-" + fmtKES(sale.discountAmt));
+  twoCol(`VAT (${sale.vatPct ?? 16}%)`, fmtKES(sale.vat));
+  bold(true);
+  twoCol("TOTAL", fmtKES(sale.total));
+  bold(false);
+  twoCol("Paid via", sale.method);
+  rule();
+  center(true);
+  line("Thank You for Shopping With Us");
+  line("Drink responsibly");
+  center(false);
+  push([0x0A, 0x0A, 0x0A, 0x0A]);
+  push([0x1D, 0x56, 66, 0]); // partial cut (ignored if unsupported)
+  return new Uint8Array(bytes);
+}
 
 /* ---------------------------------- starting data (empty — ready for real input) ---------------------------------- */
 const initialProducts = [];
@@ -126,12 +225,44 @@ function App() {
   const [productModal, setProductModal] = useState(null); // {mode:'add'|'edit', data}
   const [stockModal, setStockModal] = useState(null);
   const [toast, setToast] = useState(null);
+  const [printer, setPrinter] = useState(null); // { device, characteristic, name }
 
   const t = dark
     ? { bg: palette.charcoalBg, surface: palette.charcoalSurface, text: "#F3EEF6", sub: "#B8ACC2", border: "#3A2E42" }
     : { bg: palette.creamBg, surface: palette.creamSurface, text: palette.ink, sub: "#6B5D72", border: "#E7DFE9" };
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2200); };
+
+  const connectPrinter = async () => {
+    try {
+      const conn = await connectBluetoothPrinter();
+      conn.device.addEventListener("gattserverdisconnected", () => { setPrinter(null); showToast("Printer disconnected"); });
+      setPrinter(conn);
+      showToast(`Connected to ${conn.name}`);
+    } catch (e) {
+      showToast(e.message || "Couldn't connect to printer");
+    }
+  };
+  const disconnectPrinter = () => {
+    if (printer?.device?.gatt?.connected) printer.device.gatt.disconnect();
+    setPrinter(null);
+    showToast("Printer disconnected");
+  };
+  const printViaBluetooth = async (sale) => {
+    try {
+      let conn = printer;
+      if (!conn || !conn.device.gatt.connected) {
+        conn = await connectBluetoothPrinter();
+        conn.device.addEventListener("gattserverdisconnected", () => { setPrinter(null); showToast("Printer disconnected"); });
+        setPrinter(conn);
+      }
+      const bytes = buildEscPosReceipt(sale, businessInfo);
+      await writeBytesToPrinter(conn.characteristic, bytes);
+      showToast("Sent to printer");
+    } catch (e) {
+      showToast(e.message || "Bluetooth print failed");
+    }
+  };
 
   if (!role) {
     return <Login t={t} dark={dark} setDark={setDark} onLogin={(r, name) => { setRole(r); setCashierName(name); }} />;
@@ -277,12 +408,12 @@ function App() {
             {view === "inventory" && <Inventory t={t} products={products} lowStock={lowStock} outStock={outStock} onStockIn={(p) => setStockModal(p)} />}
             {view === "reports" && <Reports t={t} products={products} sales={sales} showToast={showToast} />}
             {view === "customers" && <Customers t={t} customers={customers} setCustomers={setCustomers} showToast={showToast} role={role} />}
-            {view === "settings" && <SettingsPanel t={t} role={role} businessInfo={businessInfo} setBusinessInfo={setBusinessInfo} showToast={showToast} />}
+            {view === "settings" && <SettingsPanel t={t} role={role} businessInfo={businessInfo} setBusinessInfo={setBusinessInfo} showToast={showToast} printer={printer} connectPrinter={connectPrinter} disconnectPrinter={disconnectPrinter} />}
           </div>
         </div>
       </div>
 
-      {receipt && <ReceiptModal t={t} sale={receipt} businessInfo={businessInfo} onClose={() => setReceipt(null)} />}
+      {receipt && <ReceiptModal t={t} sale={receipt} businessInfo={businessInfo} printer={printer} printViaBluetooth={printViaBluetooth} onClose={() => setReceipt(null)} />}
       {productModal && (
         <ProductModal t={t} mode={productModal.mode} data={productModal.data}
           onClose={() => setProductModal(null)}
@@ -662,12 +793,22 @@ function Row({ label, value, t }) {
 }
 
 /* ---------------------------------- receipt ---------------------------------- */
-function ReceiptModal({ t, sale, businessInfo, onClose }) {
+function ReceiptModal({ t, sale, businessInfo, printer, printViaBluetooth, onClose }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "#00000088", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-      <div style={{ width: 300, background: "#fff", color: "#222", borderRadius: 4, position: "relative", fontFamily: "'Courier New', monospace" }}>
-        <button onClick={onClose} style={{ position: "absolute", top: -12, right: -12, width: 28, height: 28, borderRadius: "50%", background: palette.wine, color: "#fff", border: "3px solid #fff", cursor: "pointer" }}><X size={13} /></button>
-        <div style={{ padding: "20px 18px", borderBottom: "1px dashed #999" }}>
+      <style>{`
+        @media print {
+          body * { visibility: hidden; }
+          .receipt-print, .receipt-print * { visibility: visible; }
+          .receipt-print { position: absolute; top: 0; left: 0; width: 58mm !important; box-shadow: none !important; border-radius: 0 !important; }
+          .receipt-print > div { padding-left: 6px !important; padding-right: 6px !important; }
+          .no-print { display: none !important; }
+          @page { margin: 0; size: 58mm auto; }
+        }
+      `}</style>
+      <div className="receipt-print" style={{ width: 300, background: "#fff", color: "#222", borderRadius: 4, position: "relative", fontFamily: "'Courier New', monospace" }}>
+        <button onClick={onClose} className="no-print" style={{ position: "absolute", top: -12, right: -12, width: 28, height: 28, borderRadius: "50%", background: palette.wine, color: "#fff", border: "3px solid #fff", cursor: "pointer" }}><X size={13} /></button>
+        <div style={{ padding: "20px 18px 14px", borderBottom: "1px dashed #999" }}>
           <div style={{ textAlign: "center", fontWeight: 700, fontSize: 14 }}>{businessInfo.name}</div>
           <div style={{ textAlign: "center", fontSize: 10, color: "#555" }}>{businessInfo.address} · {businessInfo.phone}</div>
           <div style={{ textAlign: "center", fontSize: 10, color: "#555" }}>PIN: {businessInfo.pin}</div>
@@ -695,11 +836,19 @@ function ReceiptModal({ t, sale, businessInfo, onClose }) {
           <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, fontSize: 12, marginTop: 4 }}><span>TOTAL</span><span>{fmtKES(sale.total)}</span></div>
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}><span>Paid via</span><span>{sale.method}</span></div>
         </div>
-        <div style={{ padding: "14px 18px", textAlign: "center" }}>
+        <div style={{ padding: "14px 18px 20px", textAlign: "center" }}>
           <div style={{ fontSize: 10.5, marginBottom: 8 }}>Thank You for Shopping With Us</div>
-          <div style={{ fontSize: 9, color: "#777", marginBottom: 10 }}>Drink responsibly · Goods sold are not returnable</div>
-          <button onClick={onClose} style={{ width: "100%", padding: 9, borderRadius: 6, border: "none", background: palette.wine, color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-            <Printer size={13} /> Print / New Sale
+          <div style={{ fontSize: 9, color: "#777", marginBottom: 14 }}>Drink responsibly · Goods sold are not returnable</div>
+          <div className="no-print" style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button onClick={() => window.print()} style={{ flex: 1, padding: 9, borderRadius: 6, border: "none", background: palette.wine, color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+              <Printer size={13} /> Print
+            </button>
+            <button onClick={() => printViaBluetooth(sale)} style={{ flex: 1, padding: 9, borderRadius: 6, border: `1px solid ${palette.wine}`, background: "transparent", color: palette.wine, fontWeight: 700, fontSize: 12, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+              <Bluetooth size={13} /> {printer ? "Print" : "Connect & Print"}
+            </button>
+          </div>
+          <button onClick={onClose} className="no-print" style={{ width: "100%", padding: 9, borderRadius: 6, border: `1px solid ${t.border}`, background: "transparent", color: "#666", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
+            New Sale
           </button>
         </div>
       </div>
@@ -1089,7 +1238,7 @@ function CustomerModal({ t, data, onClose, onSave, onDelete }) {
 }
 
 /* ---------------------------------- settings ---------------------------------- */
-function SettingsPanel({ t, role, businessInfo, setBusinessInfo, showToast }) {
+function SettingsPanel({ t, role, businessInfo, setBusinessInfo, showToast, printer, connectPrinter, disconnectPrinter }) {
   const [form, setForm] = useState(businessInfo);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const dirty = JSON.stringify(form) !== JSON.stringify(businessInfo);
@@ -1118,6 +1267,25 @@ function SettingsPanel({ t, role, businessInfo, setBusinessInfo, showToast }) {
             background: (valid && dirty) ? palette.wine : `${palette.wine}55`, color: "#fff", fontWeight: 700, fontSize: 13, cursor: (valid && dirty) ? "pointer" : "not-allowed" }}>
           {dirty ? "Save Changes" : "Saved"}
         </button>
+      </div>
+      <div style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, padding: 20, marginBottom: 16 }}>
+        <div className="serif" style={{ fontWeight: 700, fontSize: 15, marginBottom: 10 }}>Bluetooth Printer</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: printer ? palette.success : t.sub, flexShrink: 0 }} />
+          <span style={{ fontSize: 12.5, color: t.sub }}>{printer ? `Connected: ${printer.name}` : "Not connected"}</span>
+        </div>
+        {printer ? (
+          <button onClick={disconnectPrinter} style={{ padding: "9px 16px", borderRadius: 9, border: `1px solid ${palette.danger}55`, background: "transparent", color: palette.danger, fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>
+            Disconnect
+          </button>
+        ) : (
+          <button onClick={connectPrinter} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 9, border: "none", background: palette.wine, color: "#fff", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>
+            <Bluetooth size={14} /> Connect Printer
+          </button>
+        )}
+        <div style={{ fontSize: 11, color: t.sub, marginTop: 12 }}>
+          Works with 58mm Bluetooth thermal printers like the P58E. Requires Chrome on Android or desktop — pair once here, or connect directly from the receipt screen when completing a sale.
+        </div>
       </div>
       <div style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, padding: 20 }}>
         <div className="serif" style={{ fontWeight: 700, fontSize: 15, marginBottom: 10 }}>Access</div>

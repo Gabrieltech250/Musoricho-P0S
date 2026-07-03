@@ -88,24 +88,6 @@ const initialCustomers = [
   { id: 1, name: "Walk-in Customer", phone: "-", points: 0, balance: 0, visits: 0 },
 ];
 
-const weeklySales = [
-  { day: "Mon", sales: 0, profit: 0 },
-  { day: "Tue", sales: 0, profit: 0 },
-  { day: "Wed", sales: 0, profit: 0 },
-  { day: "Thu", sales: 0, profit: 0 },
-  { day: "Fri", sales: 0, profit: 0 },
-  { day: "Sat", sales: 0, profit: 0 },
-  { day: "Sun", sales: 0, profit: 0 },
-];
-
-const monthlySales = [
-  { month: "Feb", sales: 0 }, { month: "Mar", sales: 0 },
-  { month: "Apr", sales: 0 }, { month: "May", sales: 0 },
-  { month: "Jun", sales: 0 }, { month: "Jul", sales: 0 },
-];
-
-const categoryPie = [];
-
 const initialTransactions = [];
 
 const CATEGORIES = ["All", "Whisky", "Beer", "Spirits", "Wine", "Cider"];
@@ -278,7 +260,7 @@ function App() {
           </div>
 
           <div className="content-pad">
-            {view === "dashboard" && <Dashboard t={t} products={products} lowStock={lowStock} outStock={outStock} customers={customers} transactions={transactions} />}
+            {view === "dashboard" && <Dashboard t={t} products={products} lowStock={lowStock} outStock={outStock} customers={customers} transactions={transactions} sales={sales} />}
             {view === "pos" && (
               <POS t={t} products={products} setProducts={setProducts} cart={cart} setCart={setCart}
                 discountPct={discountPct} setDiscountPct={setDiscountPct} payMethod={payMethod} setPayMethod={setPayMethod}
@@ -401,28 +383,60 @@ function Login({ t, dark, setDark, onLogin }) {
 }
 
 /* ---------------------------------- dashboard ---------------------------------- */
-function Dashboard({ t, products, lowStock, outStock, customers, transactions }) {
-  const todaySales = weeklySales[weeklySales.length - 1].sales;
-  const todayProfit = weeklySales[weeklySales.length - 1].profit;
-  const weekSales = weeklySales.reduce((a, d) => a + d.sales, 0);
-  const monthSales = monthlySales[monthlySales.length - 1].sales;
-  const annualSales = monthlySales.reduce((a, d) => a + d.sales, 0) * 2;
-  const monthProfit = Math.round(monthSales * 0.29);
-  const annualProfit = Math.round(annualSales * 0.29);
+function Dashboard({ t, products, lowStock, outStock, customers, transactions, sales }) {
+  const now = new Date();
+  const isSameDay = (d1, d2) => d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate();
+  const startOfWeek = new Date(now); startOfWeek.setDate(now.getDate() - now.getDay()); startOfWeek.setHours(0, 0, 0, 0);
+
+  const stats = useMemo(() => {
+    const profitOf = (sale) => {
+      const cogs = sale.items.reduce((a, it) => {
+        const prod = products.find(p => p.id === it.id);
+        return a + it.qty * (prod ? prod.buy : 0);
+      }, 0);
+      return (sale.subtotal - sale.discountAmt) - cogs;
+    };
+
+    let todaySales = 0, todayProfit = 0, weekSales = 0, monthSales = 0, annualSales = 0, monthProfit = 0, annualProfit = 0;
+    const dayBuckets = [0, 0, 0, 0, 0, 0, 0]; // Sun..Sat, sales
+    const profitBuckets = [0, 0, 0, 0, 0, 0, 0];
+    const categoryTotals = {};
+
+    sales.forEach(s => {
+      const d = new Date(s.ts || Date.now());
+      const profit = profitOf(s);
+      if (isSameDay(d, now)) { todaySales += s.total; todayProfit += profit; }
+      if (d >= startOfWeek) { weekSales += s.total; dayBuckets[d.getDay()] += s.total; profitBuckets[d.getDay()] += profit; }
+      if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth()) { monthSales += s.total; monthProfit += profit; }
+      if (d.getFullYear() === now.getFullYear()) { annualSales += s.total; annualProfit += profit; }
+      s.items.forEach(it => {
+        const prod = products.find(p => p.id === it.id);
+        const cat = prod ? prod.category : "Other";
+        categoryTotals[cat] = (categoryTotals[cat] || 0) + it.qty * it.price;
+      });
+    });
+
+    const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const weekChart = dayLabels.map((day, i) => ({ day, sales: dayBuckets[i], profit: profitBuckets[i] }));
+
+    const catColors = [palette.wine, palette.gold, palette.wineLight, palette.goldSoft, "#9C8AA5", "#6B8E7C"];
+    const categoryPie = Object.entries(categoryTotals).map(([name, value], i) => ({ name, value, color: catColors[i % catColors.length] }));
+
+    return { todaySales, todayProfit, weekSales, monthSales, annualSales, monthProfit, annualProfit, weekChart, categoryPie };
+  }, [sales, products]);
 
   const cards = [
-    { label: "Today's Sales", value: fmtKES(todaySales), icon: DollarSign, tone: palette.wine },
-    { label: "Weekly Sales", value: fmtKES(weekSales), icon: TrendingUp, tone: palette.wineLight },
-    { label: "Monthly Sales", value: fmtKES(monthSales), icon: TrendingUp, tone: palette.wine },
-    { label: "Annual Sales", value: fmtKES(annualSales), icon: TrendingUp, tone: palette.wineLight },
-    { label: "Today's Profit", value: fmtKES(todayProfit), icon: DollarSign, tone: palette.success },
-    { label: "Monthly Profit", value: fmtKES(monthProfit), icon: DollarSign, tone: palette.success },
-    { label: "Annual Profit", value: fmtKES(annualProfit), icon: DollarSign, tone: palette.success },
+    { label: "Today's Sales", value: fmtKES(stats.todaySales), icon: DollarSign, tone: palette.wine },
+    { label: "Weekly Sales", value: fmtKES(stats.weekSales), icon: TrendingUp, tone: palette.wineLight },
+    { label: "Monthly Sales", value: fmtKES(stats.monthSales), icon: TrendingUp, tone: palette.wine },
+    { label: "Annual Sales", value: fmtKES(stats.annualSales), icon: TrendingUp, tone: palette.wineLight },
+    { label: "Today's Profit", value: fmtKES(stats.todayProfit), icon: DollarSign, tone: palette.success },
+    { label: "Monthly Profit", value: fmtKES(stats.monthProfit), icon: DollarSign, tone: palette.success },
+    { label: "Annual Profit", value: fmtKES(stats.annualProfit), icon: DollarSign, tone: palette.success },
     { label: "Total Products", value: products.length, icon: Package, tone: palette.gold },
     { label: "Low Stock", value: lowStock.length, icon: AlertTriangle, tone: "#C97C22" },
     { label: "Out of Stock", value: outStock.length, icon: AlertTriangle, tone: palette.danger },
     { label: "Total Customers", value: customers.length, icon: Users, tone: palette.wineLight },
-    { label: "Total Suppliers", value: 9, icon: Boxes, tone: palette.wine },
   ];
 
   return (
@@ -441,9 +455,9 @@ function Dashboard({ t, products, lowStock, outStock, customers, transactions })
 
       <div className="two-col-wide" style={{ marginBottom: 16 }}>
         <div style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, padding: 18 }}>
-          <div className="serif" style={{ fontWeight: 700, marginBottom: 12, fontSize: 14.5 }}>Weekly Sales &amp; Profit</div>
+          <div className="serif" style={{ fontWeight: 700, marginBottom: 12, fontSize: 14.5 }}>This Week's Sales &amp; Profit</div>
           <ResponsiveContainer width="100%" height={230}>
-            <LineChart data={weeklySales}>
+            <LineChart data={stats.weekChart}>
               <CartesianGrid strokeDasharray="3 3" stroke={t.border} />
               <XAxis dataKey="day" stroke={t.sub} fontSize={11} />
               <YAxis stroke={t.sub} fontSize={11} tickFormatter={(v) => `${v / 1000}k`} />
@@ -456,15 +470,19 @@ function Dashboard({ t, products, lowStock, outStock, customers, transactions })
         </div>
         <div style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, padding: 18 }}>
           <div className="serif" style={{ fontWeight: 700, marginBottom: 12, fontSize: 14.5 }}>Sales by Category</div>
-          <ResponsiveContainer width="100%" height={230}>
-            <PieChart>
-              <Pie data={categoryPie} dataKey="value" nameKey="name" innerRadius={45} outerRadius={80} paddingAngle={2}>
-                {categoryPie.map((c, i) => <Cell key={i} fill={c.color} />)}
-              </Pie>
-              <Tooltip contentStyle={{ background: t.surface, border: `1px solid ${t.border}`, fontSize: 12 }} />
-              <Legend wrapperStyle={{ fontSize: 11 }} />
-            </PieChart>
-          </ResponsiveContainer>
+          {stats.categoryPie.length > 0 ? (
+            <ResponsiveContainer width="100%" height={230}>
+              <PieChart>
+                <Pie data={stats.categoryPie} dataKey="value" nameKey="name" innerRadius={45} outerRadius={80} paddingAngle={2}>
+                  {stats.categoryPie.map((c, i) => <Cell key={i} fill={c.color} />)}
+                </Pie>
+                <Tooltip formatter={(v) => fmtKES(v)} contentStyle={{ background: t.surface, border: `1px solid ${t.border}`, fontSize: 12 }} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : (
+            <div style={{ height: 230, display: "flex", alignItems: "center", justifyContent: "center", color: t.sub, fontSize: 12.5 }}>No sales yet</div>
+          )}
         </div>
       </div>
 
@@ -537,6 +555,7 @@ function POS({ t, products, setProducts, cart, setCart, discountPct, setDiscount
     }));
     const sale = {
       id: "RC-" + Math.floor(10000 + Math.random() * 89999),
+      ts: Date.now(),
       time: new Date().toLocaleTimeString("en-KE", { hour: "2-digit", minute: "2-digit" }),
       date: new Date().toLocaleDateString("en-KE"),
       cashier: cashierName,
